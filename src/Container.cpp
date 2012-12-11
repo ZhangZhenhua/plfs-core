@@ -1647,7 +1647,7 @@ Container::makeHostDir(const ContainerPaths& paths,mode_t mode,
             ret = makeSubdir(paths.canonical.c_str(),mode);
         }
         if (ret == 0 || errno == EEXIST || errno == EISDIR) {
-           ret = Util::Mkdir(paths.canonical_hostdir.c_str(),mode);
+           ret = makeSubdir(paths.canonical_hostdir, DROPPING_MODE);
            if (ret == 0 || errno == EEXIST) {
               //ok
               mlog(INT_DCOMMON, "%s Make %s done, %d", __FUNCTION__, 
