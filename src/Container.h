@@ -57,15 +57,18 @@ class Container
         // static stuff
         static int create( const string&, const string&,
                            mode_t mode, int flags, int *extra_attempts,pid_t,
-                           unsigned, bool lazy_subdir );
+                           unsigned);
 
         static bool isContainer(const string& physical_path,mode_t *);
         static string getIndexPath( const string&, const string&,
-                                    int pid,double);
+                                    int pid,double,IndexEntryType);
         static string getDataPath(  const string&, const string&,
-                                    int pid, double);
+                                    int pid, double, IndexEntryType);
         static string getIndexHostPath(const string& path,
-                                       const string& host,int pid,double ts);
+                                       const string& host,int pid,double ts,
+                                       IndexEntryType);
+        static string getMetalinkPath(const string& container, int pid,
+                                      double timestamp);
         static int addMeta(off_t, size_t, const string&,const string&,uid_t,
                            double,int,size_t);
         static string fetchMeta( const string&, off_t *, size_t *,
@@ -73,9 +76,8 @@ class Container
         static int addOpenrecord( const string&, const string&, pid_t );
         static int removeOpenrecord( const string&, const string&, pid_t );
 
-        static size_t getHostDirId( const string& );
-        static string getHostDirPath( const string&,
-                                      const string&, subdir_type );
+        static size_t getHostDirId( int );
+        static string getHostDirPath( const string&, int , subdir_type );
         static string getMetaDirPath( const string& );
         static string getVersionDir( const string& path );
         static string getAccessFilePath( const string& path );
@@ -92,11 +94,10 @@ class Container
         static mode_t fileMode( mode_t );
         static mode_t dirMode(  mode_t );
         static mode_t containerMode(  mode_t );
-        static int makeHostDir(const string& path, const string& host,
+        static int makeHostDir(const string& path, int pid,
                                mode_t mode, parentStatus);
         static int makeHostDir(const ContainerPaths& paths,mode_t mode,
-                               parentStatus pstat, string& physical_hostdir,
-                               bool& use_metalink);
+                               parentStatus pstat, pid_t, double);
         static int transferCanonical(const string& from,
                                      const string& to,
                                      const string& from_backend,
@@ -110,9 +111,10 @@ class Container
         //static int Access( const string &path, int mask );
 
         static int createMetalink(const string&,const string&,const string&,
-                                  string&, bool&);
+                                  pid_t, double, bool);
         static int readMetalink(const string&,string&, size_t&);
         static int resolveMetalink(const string&, string&);
+        static int collectTargets(const string& physical, set<string> &targets);
         static int collectIndices(const string& path, vector<string> &indices,
                                   bool full_path);
 
@@ -120,6 +122,7 @@ class Container
                                    vector<string> &files,
                                    vector<string> *dirs,
                                    vector<string> *mlinks,
+                                   set<string>    &targets,
                                    vector<string> &filters,
                                    bool full_path);
         static int flattenIndex( const string&, Index * );
@@ -128,8 +131,8 @@ class Container
         static int freeIndex( Index ** );
         static size_t hashValue( const char *str );
         static blkcnt_t bytesToBlocks( size_t total_bytes );
-        static int nextdropping( const string&, string *, const char *,
-                                 DIR **, DIR **, struct dirent ** );
+        //static int nextdropping( const string&, string *, const char *,
+        //                         DIR **, DIR **, struct dirent ** );
         static int makeSubdir(const string& path, mode_t mode);
         static int makeDropping(const string& path);
         static int makeAccess(const string& path,mode_t mode);
@@ -149,12 +152,11 @@ class Container
         static bool istype(const string& dropping, const char *type);
         static int createHelper( const string&, const string&,
                                  mode_t mode, int flags, int *extra_attempts,
-                                 pid_t,unsigned,
-                                 bool lazy_subdir);
+                                 pid_t,unsigned);
         static int makeTopLevel(const string&, const string&, mode_t, pid_t,
-                                unsigned, bool lazy_subdir);
-        static string getChunkPath( const string&, const string&,
-                                    int pid, const char *, double );
+                                unsigned);
+        static string getChunkPath( const string&, const string&, int pid,
+                                    const char *, double);
         static string chunkPath( const string& hostdir, const char *type,
                                  const string& host, int pid,
                                  const string& ts );
@@ -165,7 +167,8 @@ class Container
         static string hostdirFromChunk( string chunkpath, const char *type );
         static string timestampFromChunk(string hostindex, const char *type);
         static string containerFromChunk( string datapath );
-        static struct dirent *getnextent( DIR *dir, const char *prefix );
+        static int pidFromChunk( string chunkpath );
+        //static struct dirent *getnextent( DIR *dir, const char *prefix );
         static int makeMeta( const string& path, mode_t type, mode_t mode );
         static int ignoreNoEnt( int ret );
 };

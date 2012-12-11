@@ -17,9 +17,10 @@ using namespace std;
 // shadow or canonical container (i.e. not relying on symlinks)
 // anyway, this should all happen above WriteFile and be transparent to
 // WriteFile.  This comment is for educational purposes only.
-WriteFile::WriteFile(string path, string hostname,
-                     mode_t mode, size_t buffer_mbs ) : Metadata::Metadata()
+WriteFile::WriteFile(string logical, string path, string hostname, mode_t mode,
+                     size_t buffer_mbs) : Metadata::Metadata()
 {
+    this->logical_path      = logical;
     this->container_path    = path;
     this->subdir_path       = path;
     this->hostname          = hostname;
@@ -58,6 +59,24 @@ WriteFile::~WriteFile()
     pthread_mutex_destroy( &index_mux );
 }
 
+// a helper function to set OpenFd for each WriteType
+int WriteFile::setOpenFd(OpenFd *ofd, int fd, WriteType wType)
+{
+    assert(ofd != NULL && fd > 0);
+    switch( wType ){
+       case SINGLE_HOST_WRITE:
+          ofd->sh_fd = fd;
+          break;
+       case SIMPLE_FORMULA_WRITE:
+       case SIMPLE_FORMULA_WITHOUT_INDEX:
+          ofd->sf_fds.push_back(fd);
+          break;
+       default:
+           mlog(WF_DRARE, "%s, unknown write type", __FUNCTION__);
+           return -1;
+    }
+    return 0;
+}
 
 int WriteFile::sync()
 {
@@ -65,8 +84,15 @@ int WriteFile::sync()
     // iterate through and sync all open fds
     Util::MutexLock( &data_mux, __FUNCTION__ );
     map<pid_t, OpenFd >::iterator pids_itr;
+    WF_FD_ITR fd_itr;
+    OpenFd *ofd;
     for( pids_itr = fds.begin(); pids_itr != fds.end() && ret==0; pids_itr++ ) {
-        ret = Util::Fsync( pids_itr->second.fd );
+        ofd = &pids_itr->second;
+        for(fd_itr = ofd->sf_fds.begin(); fd_itr != ofd->sf_fds.end();
+            fd_itr ++){
+            ret = Util::Fsync( *fd_itr );
+        }
+        ret = Util::Fsync(ofd->sh_fd);
     }
     Util::MutexUnlock( &data_mux, __FUNCTION__ );
 
@@ -74,9 +100,7 @@ int WriteFile::sync()
     Util::MutexLock( &index_mux, __FUNCTION__ );
     if ( ret == 0 ) {
         index->flush();
-    }
-    if ( ret == 0 ) {
-        ret = Util::Fsync( index->getFd() );
+        index->sync();
     }
     Util::MutexUnlock( &index_mux, __FUNCTION__ );
     return ret;
@@ -90,13 +114,15 @@ int WriteFile::sync( pid_t pid )
         // ugh, sometimes FUSE passes in weird pids, just ignore this
         //ret = -ENOENT;
     } else {
-        ret = Util::Fsync( ofd->fd );
+        WF_FD_ITR itr;
+        for(itr = ofd->sf_fds.begin(); itr != ofd->sf_fds.end(); itr ++ ){
+            ret = Util::Fsync( *itr );
+        }
+        ret = Util::Fsync( ofd->sh_fd );
         Util::MutexLock( &index_mux, __FUNCTION__ );
         if ( ret == 0 ) {
             index->flush();
-        }
-        if ( ret == 0 ) {
-            ret = Util::Fsync( index->getFd() );
+            index->sync();
         }
         Util::MutexUnlock( &index_mux, __FUNCTION__ );
         if ( ret != 0 ) {
@@ -106,9 +132,8 @@ int WriteFile::sync( pid_t pid )
     return ret;
 }
 
-
 // returns -errno or number of writers
-int WriteFile::addWriter( pid_t pid, bool child )
+int WriteFile::addWriter( pid_t pid, bool child , WriteType wType)
 {
     int ret = 0;
     Util::MutexLock(   &data_mux, __FUNCTION__ );
@@ -116,11 +141,22 @@ int WriteFile::addWriter( pid_t pid, bool child )
     if ( ofd ) {
         ofd->writers++;
     } else {
-        int fd = openDataFile( subdir_path, hostname, pid, DROPPING_MODE);
+        if (child==true){
+            // child may use different hostdirId with parent, so
+            // set it up corrently for child
+            ContainerPaths paths;
+            ret = findContainerPaths(logical_path,paths,pid);
+            if (ret!=0){
+                PLFS_EXIT(ret);
+            }
+            ret=Container::makeHostDir(paths, mode, PARENT_ABSENT,
+                                       pid, Util::getTime());
+        }
+        int fd = openDataFile(subdir_path, hostname, pid, DROPPING_MODE, wType);
         if ( fd >= 0 ) {
             struct OpenFd ofd;
             ofd.writers = 1;
-            ofd.fd = fd;
+            setOpenFd(&ofd,fd,wType);
             fds[pid] = ofd;
         } else {
             ret = -errno;
@@ -205,6 +241,29 @@ struct OpenFd *WriteFile::getFd( pid_t pid ) {
     return ofd;
 }
 
+int WriteFile::whichFd ( OpenFd *ofd, WriteType wType )
+{
+    int fd;
+    if (ofd == NULL) return -1;
+    switch( wType ){
+       case SINGLE_HOST_WRITE:
+          fd = ofd->sh_fd;
+          break;
+       case SIMPLE_FORMULA_WRITE:
+       case SIMPLE_FORMULA_WITHOUT_INDEX:
+          if ( ofd->sf_fds.empty() ){
+              fd = -1;
+          }else{
+              fd = ofd->sf_fds.back();
+          }
+          break;
+       default:
+           mlog(WF_DRARE, "%s, unknown write type", __FUNCTION__);
+           fd = -1;
+    }
+    return fd;
+}
+
 int WriteFile::closeFd( int fd )
 {
     map<int,string>::iterator paths_itr;
@@ -236,7 +295,11 @@ WriteFile::removeWriter( pid_t pid )
     } else {
         ofd->writers--;
         if ( ofd->writers <= 0 ) {
-            ret = closeFd( ofd->fd );
+            WF_FD_ITR itr;
+            for(itr = ofd->sf_fds.begin(); itr != ofd->sf_fds.end(); itr ++ ){
+                ret = closeFd( *itr );
+            }
+            ret = closeFd(ofd->sh_fd);
             fds.erase( pid );
         }
     }
@@ -254,7 +317,7 @@ WriteFile::extend( off_t offset )
         return -ENOENT;
     }
     pid_t p = fds.begin()->first;
-    index->addWrite( offset, 0, p, createtime, createtime );
+    index->extend(offset, p, createtime);
     addWrite( offset, 0 );   // maintain metadata
     return 0;
 }
@@ -267,7 +330,8 @@ WriteFile::extend( off_t offset )
 //
 // returns bytes written or -errno
 ssize_t
-WriteFile::write(const char *buf, size_t size, off_t offset, pid_t pid)
+WriteFile::write(const char *buf, size_t size, off_t offset, pid_t pid,
+                 WriteType wType)
 {
     int ret = 0;
     ssize_t written;
@@ -276,7 +340,7 @@ WriteFile::write(const char *buf, size_t size, off_t offset, pid_t pid)
         // we used to return -ENOENT here but we can get here legitimately
         // when a parent opens a file and a child writes to it.
         // so when we get here, we need to add a child datafile
-        ret = addWriter( pid, true );
+        ret = addWriter( pid, true , wType);
         if ( ret > 0 ) {
             // however, this screws up the reference count
             // it looks like a new writer but it's multiple writers
@@ -284,8 +348,11 @@ WriteFile::write(const char *buf, size_t size, off_t offset, pid_t pid)
             ofd = getFd( pid );
         }
     }
-    if ( ofd && ret >= 0 ) {
-        int fd = ofd->fd;
+    int fd = whichFd(ofd, wType);
+    if ( fd == -1 ){
+        fd = openNewDataFile(pid, wType);
+    }
+    if ( fd > 0 ) {
         // write the data file
         double begin, end;
         begin = Util::getTime();
@@ -295,7 +362,16 @@ WriteFile::write(const char *buf, size_t size, off_t offset, pid_t pid)
         if ( ret >= 0 ) {
             write_count++;
             Util::MutexLock(   &index_mux , __FUNCTION__);
-            index->addWrite( offset, ret, pid, begin, end );
+            if (wType == SINGLE_HOST_WRITE){
+                index->addWrite( offset, ret, pid, begin, end );
+            }else if (wType == SIMPLE_FORMULA_WRITE){
+                index->updateSimpleFormula(begin,end);
+            }else if (wType == SIMPLE_FORMULA_WITHOUT_INDEX){
+                // do nothing
+            }else{
+                mlog(WF_DCOMMON, "Unexpected write type %d", wType);
+                return -1;
+            }
             // TODO: why is 1024 a magic number?
             int flush_count = 1024;
             if (write_count%flush_count==0) {
@@ -319,20 +395,27 @@ WriteFile::write(const char *buf, size_t size, off_t offset, pid_t pid)
 
 // this assumes that the hostdir exists and is full valid path
 // returns 0 or -errno
-int WriteFile::openIndex( pid_t pid ) {
+int WriteFile::openIndex( pid_t pid, WriteType wType) {
     int ret = 0;
+    bool new_index = false;
     string index_path;
+
     int fd = openIndexFile(subdir_path, hostname, pid, DROPPING_MODE,
-                           &index_path);
+                           &index_path, wType);
     if ( fd < 0 ) {
         ret = -errno;
     } else {
-        Util::MutexLock(&index_mux , __FUNCTION__);
-        index = new Index(container_path, fd);
-        Util::MutexUnlock(&index_mux, __FUNCTION__);
+        if ( index == NULL ) {
+           Util::MutexLock(&index_mux , __FUNCTION__);
+           if ( index == NULL ){
+              index = new Index(container_path);
+              new_index = true;
+           }
+           Util::MutexUnlock(&index_mux, __FUNCTION__);
+        }
         mlog(WF_DAPI, "In open Index path is %s",index_path.c_str());
-        index->index_path=index_path;
-        if(index_buffer_mbs) {
+        index->setCurrentFd(fd,index_path);
+        if(new_index && index_buffer_mbs) {
             index->startBuffering();
         }
     }
@@ -342,12 +425,40 @@ int WriteFile::openIndex( pid_t pid ) {
 int WriteFile::closeIndex( )
 {
     int ret = 0;
+    vector< int > fd_list;
+    vector< int >::iterator itr;
     Util::MutexLock(   &index_mux , __FUNCTION__);
     ret = index->flush();
-    ret = closeFd( index->getFd() );
+    index->getFd( fd_list );
+    for(itr=fd_list.begin(); itr!=fd_list.end(); itr++){
+        ret = closeFd( *itr );
+    }
     delete( index );
     index = NULL;
     Util::MutexUnlock( &index_mux, __FUNCTION__ );
+    return ret;
+}
+
+int WriteFile::openNewDataFile( pid_t pid, WriteType wType )
+{
+    int ret;
+    Util::MutexLock(   &data_mux, __FUNCTION__ );
+    int fd = openDataFile( subdir_path, hostname, pid, DROPPING_MODE, wType);
+    if ( fd >= 0 ) {
+        struct OpenFd *ofd = getFd( pid );
+        if (ofd == NULL){
+            struct OpenFd ofd;
+            ofd.writers = 1;
+            setOpenFd(&ofd, fd, wType);
+            fds[pid] = ofd;
+        } else {
+            setOpenFd(ofd, fd, wType);
+        }
+        ret = fd;
+    } else {
+        ret = -errno;
+    }
+    Util::MutexUnlock( &data_mux, __FUNCTION__ );
     return ret;
 }
 
@@ -357,10 +468,18 @@ int WriteFile::Close()
     int failures = 0;
     Util::MutexLock(   &data_mux , __FUNCTION__);
     map<pid_t,OpenFd >::iterator itr;
+    WF_FD_ITR fd_itr;
     // these should already be closed here
     // from each individual pid's close but just in case
     for( itr = fds.begin(); itr != fds.end(); itr++ ) {
-        if ( closeFd( itr->second.fd ) != 0 ) {
+        for(fd_itr = itr->second.sf_fds.begin();
+            fd_itr != itr->second.sf_fds.end();
+            fd_itr++){
+            if ( closeFd( *fd_itr ) != 0 ) {
+                failures++;
+            }
+        }
+        if ( closeFd( itr->second.sh_fd ) != 0 ){
             failures++;
         }
     }
@@ -378,15 +497,52 @@ int WriteFile::truncate( off_t offset )
 }
 
 int WriteFile::openIndexFile(string path, string host, pid_t p, mode_t m,
-                             string *index_path)
+                             string *index_path, WriteType wType)
 {
-    *index_path = Container::getIndexPath(path,host,p,createtime);
+    switch (wType){
+        case SINGLE_HOST_WRITE:
+           *index_path = Container::getIndexPath(path,host,p,createtime,
+                                                 BYTERANGE);
+           break;
+        case SIMPLE_FORMULA_WRITE:
+           if (index->getFd(SIMPLEFORMULA) > 0 ) return -1;
+           // store SimpleFormula index file in canonical container
+           // so we can always get the correct metalink locations,
+           // even after renaming the file
+           *index_path = Container::getIndexPath(container_path,host,p,
+                                                 metalinkTime,SIMPLEFORMULA);
+           break;
+        case SIMPLE_FORMULA_WITHOUT_INDEX:
+           // do nothing
+           return -1;
+        default:
+           mlog(WF_DRARE, "%s, unexpected write type", __FUNCTION__);
+           return -1;
+    }
+    mlog(WF_DBG, "WF: opening index file %s", (*index_path).c_str());
     return openFile(*index_path,m);
 }
 
-int WriteFile::openDataFile(string path, string host, pid_t p, mode_t m)
+int WriteFile::openDataFile(string path, string host, pid_t p, mode_t m,
+                            WriteType wType)
 {
-    return openFile(Container::getDataPath(path,host,p,createtime),m);
+    string data_path;
+    switch (wType){
+        case SINGLE_HOST_WRITE:
+           data_path = Container::getDataPath(path,host,p,createtime,
+                                              BYTERANGE);
+           break;
+        case SIMPLE_FORMULA_WRITE:
+        case SIMPLE_FORMULA_WITHOUT_INDEX:
+           data_path = Container::getDataPath(path,host,p,formulaTime,
+                                              SIMPLEFORMULA);
+           break;
+        default:
+           mlog(WF_DRARE, "%s, unknown write type", __FUNCTION__);
+           return -1;
+    }
+    mlog(WF_DBG, "WF: opening data file %s", data_path.c_str());
+    return openFile(data_path , m);
 }
 
 // returns an fd or -1
@@ -395,15 +551,35 @@ int WriteFile::openFile( string physicalpath, mode_t mode )
     mode_t old_mode=umask(0);
     int flags = O_WRONLY | O_APPEND | O_CREAT;
     int fd = Util::Open( physicalpath.c_str(), flags, mode );
+    if ( fd >= 0 ) {
+        paths[fd] = physicalpath;    // remember so restore works
+    }
     mlog(WF_DAPI, "%s.%s open %s : %d %s",
          __FILE__, __FUNCTION__,
          physicalpath.c_str(),
          fd, ( fd < 0 ? strerror(errno) : "" ) );
-    if ( fd >= 0 ) {
-        paths[fd] = physicalpath;    // remember so restore works
-    }
     umask(old_mode);
     return ( fd >= 0 ? fd : -errno );
+}
+
+// a helper function to resotre data file fd
+int WriteFile::restore_helper(int fd, string *path)
+{
+    int ret;
+    map<int,string>::iterator paths_itr;
+    paths_itr = paths.find( fd );
+    if ( paths_itr == paths.end() ) {
+        return -ENOENT;
+    }
+    *path = paths_itr->second;
+    if ( closeFd( fd ) != 0 ) {
+        return -errno;
+    }
+    ret = openFile( *path, mode );
+    if ( ret < 0 ) {
+        return -errno;
+    }
+    return ret;
 }
 
 // we call this after any calls to f_truncate
@@ -413,8 +589,9 @@ int WriteFile::openFile( string physicalpath, mode_t mode )
 // return 0 or -errno
 int WriteFile::restoreFds( bool droppings_were_truncd )
 {
-    map<int,string>::iterator paths_itr;
     map<pid_t, OpenFd >::iterator pids_itr;
+    WF_FD_ITR fd_itr;
+    OpenFd *ofd;
     int ret = 0;
     // "has_been_renamed" is set at "addWriter, setPath" executing path.
     // This assertion will be triggered when user open a file with write mode
@@ -430,18 +607,16 @@ int WriteFile::restoreFds( bool droppings_were_truncd )
     if ( index ) {
         Util::MutexLock( &index_mux, __FUNCTION__ );
         index->flush();
-        paths_itr = paths.find( index->getFd() );
-        if ( paths_itr == paths.end() ) {
-            return -ENOENT;
+        vector< int > fd_list;
+        index->getFd( fd_list );
+        vector< int >::iterator itr;
+        for(itr=fd_list.begin(); itr!=fd_list.end(); itr++){
+            string indexpath;
+            if ( (ret = restore_helper(*itr, &indexpath)) < 0 ){
+                return ret;
+            }
+            index->setCurrentFd( ret, indexpath );
         }
-        string indexpath = paths_itr->second;
-        if ( closeFd( index->getFd() ) != 0 ) {
-            return -errno;
-        }
-        if ( (ret = openFile( indexpath, mode )) < 0 ) {
-            return -errno;
-        }
-        index->resetFd( ret );
         if (droppings_were_truncd) {
             // this means that they were truncd to 0 offset
             index->resetPhysicalOffsets();
@@ -450,17 +625,20 @@ int WriteFile::restoreFds( bool droppings_were_truncd )
     }
     // then the data fds
     for( pids_itr = fds.begin(); pids_itr != fds.end(); pids_itr++ ) {
-        paths_itr = paths.find( pids_itr->second.fd );
-        if ( paths_itr == paths.end() ) {
-            return -ENOENT;
-        }
-        string datapath = paths_itr->second;
-        if ( closeFd( pids_itr->second.fd ) != 0 ) {
-            return -errno;
-        }
-        pids_itr->second.fd = openFile( datapath, mode );
-        if ( pids_itr->second.fd < 0 ) {
-            return -errno;
+        ofd = &pids_itr->second;
+        string unused;
+        // handle ByteRange data file first
+        if ( (ret = restore_helper(ofd->sh_fd, &unused)) < 0 ){
+            return ret;
+        } 
+        ofd->sh_fd = ret;
+        // then SimpleFormula data files
+        for(fd_itr = ofd->sf_fds.begin(); fd_itr != ofd->sf_fds.end();
+            fd_itr ++){
+            if ( (ret = restore_helper(*fd_itr, &unused)) < 0 ){
+                return ret;
+            }
+            *fd_itr = ret;
         }
     }
     // normally we return ret at the bottom of our functions but this

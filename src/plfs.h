@@ -27,12 +27,35 @@ typedef void *Plfs_fd;
         CONTAINER, FLAT_FILE, PFT_UNKNOWN
     } plfs_filetype;
 
+    typedef enum {
+        RANDOM, STRIDED, SEGMENTED
+    } plfs_io_pattern;
+
     typedef struct {
         char *index_stream; /* Index stream passed in from another proc */
         int  buffer_index;  /* Buffer index yes/no                      */
         plfs_interface pinter;
         int  reopen;
+        double metalink_timestamp;
     } Plfs_open_opt;
+
+    typedef struct {
+        int pid;
+        int number_of_writers;
+        int size;
+        int write_index;    /* write index file or not */
+        off_t start;
+        off_t end;
+        double timestamp;
+        plfs_io_pattern strided;
+    } PatternWriteArgs;
+
+    typedef struct {
+        plfs_io_pattern pattern_type;
+        union {
+            PatternWriteArgs patternArgs; // for STRIDED and SEGMENTED type
+        } writeArgs;
+    } Plfs_write_opt;
 
     typedef struct {
         off_t last_offset;
@@ -113,7 +136,8 @@ typedef void *Plfs_fd;
                      int size_only);
 
     char *plfs_gethostname();
-    size_t plfs_gethostdir_id(char *);
+    size_t plfs_gethashval(char *);
+    size_t plfs_gethostdir_id(int val);
 
     /* Index stream related functions */
     int plfs_index_stream(Plfs_fd **pfd, char **buffer);
@@ -207,7 +231,8 @@ typedef void *Plfs_fd;
 
     int plfs_file_version(const char *, const char **);
 
-    ssize_t plfs_write( Plfs_fd *, const char *, size_t, off_t, pid_t );
+    ssize_t plfs_write( Plfs_fd *, const char *, size_t, off_t,
+                        pid_t, Plfs_write_opt * );
 
     double plfs_wtime();
 

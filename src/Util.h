@@ -114,10 +114,12 @@ class Util
         static void addTime( string, double, bool );
         static char *hostname();
         static int retValue( int res );
+#if 0
         static int traverseDirectoryTree(const char *physical,
                                          vector<string> &files,
                                          vector<string> &dirs,
                                          vector<string>&links);
+#endif
     private:
         static void addBytes( string, size_t );
         static string timeToString(      HASH_MAP<string,double>::iterator,

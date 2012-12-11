@@ -10,6 +10,7 @@
 #include "FileOp.h"
 #include "container_internals.h"
 #include "ContainerFS.h"
+#include "ContainerFD.h"
 #include "mlog_oss.h"
 
 #include <errno.h>
@@ -45,7 +46,9 @@ typedef struct {
     off_t logical_offset;
     char *buf;
     pid_t chunk_id; // in order to stash fd's back into the index
-    string path;
+    string path;    // if path contains HOSTDIRPREFIX, then it's a full path
+                    // byteRange data file, otherwise, it's a container path
+                    // for SimpleFormula data file
     bool hole;
 } ReadTask;
 
@@ -63,17 +66,24 @@ char *plfs_gethostname()
     return Util::hostname();
 }
 
-size_t plfs_gethostdir_id(char *hostname)
+size_t plfs_gethashval(char *hostname)
 {
-    return Container::getHostDirId(hostname);
+    return Container::hashValue(hostname);
+}
+
+size_t plfs_gethostdir_id(int val)
+{
+    return Container::getHostDirId(val);
 }
 
 int
 plfs_dump_index_size()
 {
-    ContainerEntry e;
-    cout << "An index entry is size " << sizeof(e) << endl;
-    return (int)sizeof(e);
+    SingleByteRangeInMemEntry e;
+    SimpleFormulaInMemEntry s;
+    cout << "An ByteRange index entry is size " << sizeof(e) << endl;
+    cout << "An SimpleFormula index entry is size " << sizeof(s) << endl;
+    return (int)(sizeof(e) + sizeof(s));
 }
 
 // returns 0 or -errno
@@ -130,36 +140,9 @@ retValue( int res )
     return Util::retValue(res);
 }
 
-// this is a helper routine that takes a logical path and figures out a
-// bunch of derived paths from it
-int
-findContainerPaths(const string& logical, ContainerPaths& paths)
-{
-    ExpansionInfo exp_info;
-    char *hostname = Util::hostname();
-    // set up our paths.  expansion errors shouldn't happen but check anyway
-    // set up shadow first
-    paths.shadow = expandPath(logical,&exp_info,EXPAND_SHADOW,-1,0);
-    if (exp_info.Errno) {
-        return (exp_info.Errno);
-    }
-    paths.shadow_hostdir = Container::getHostDirPath(paths.shadow,hostname,
-                           PERM_SUBDIR);
-    paths.hostdir=paths.shadow_hostdir.substr(paths.shadow.size(),string::npos);
-    paths.shadow_backend = get_backend(exp_info);
-    // now set up canonical
-    paths.canonical = expandPath(logical,&exp_info,EXPAND_CANONICAL,-1,0);
-    if (exp_info.Errno) {
-        return (exp_info.Errno);
-    }
-    paths.canonical_backend = get_backend(exp_info);
-    paths.canonical_hostdir=Container::getHostDirPath(paths.canonical,hostname,
-                            PERM_SUBDIR);
-    return 0;  // no expansion errors.  All paths derived and returned
-}
 
 int
-container_create( const char *logical, mode_t mode, int flags, pid_t pid )
+container_create( const char *logical, mode_t mode, int flags, pid_t pid)
 {
     PLFS_ENTER;
     // for some reason, the ad_plfs_open that calls this passes a mode
@@ -169,33 +152,9 @@ container_create( const char *logical, mode_t mode, int flags, pid_t pid )
         mlog(PLFS_DRARE, "%s on non-regular file %s?",__FUNCTION__, logical);
         PLFS_EXIT(-ENOSYS);
     }
-    // ok.  For instances in which we ALWAYS want shadow containers such
-    // as we have a canonical location which is remote and slow and we want
-    // ALWAYS to store subdirs in faster shadows, then we want to create
-    // the subdir's lazily.  This means that the subdir will not be created
-    // now and later when procs try to write to the file, they will discover
-    // that the subdir doesn't exist and they'll set up the shadow and the
-    // metalink at that time
-    bool lazy_subdir = false;
-    if (expansion_info.mnt_pt->shadow_backends.size()>0) {
-        // ok, user has explicitly set a set of shadow_backends
-        // this suggests that the user wants the subdir somewhere else
-        // beside the canonical location.  Let's double check though.
-        ContainerPaths paths;
-        ret = findContainerPaths(logical,paths);
-        if (ret!=0) {
-            PLFS_EXIT(ret);
-        }
-        lazy_subdir = !(paths.shadow==paths.canonical);
-        mlog(INT_DCOMMON, "Due to explicit shadow_backends directive, setting "
-             "subdir %s to be created %s\n",
-             paths.shadow.c_str(),
-             (lazy_subdir?"lazily":"eagerly"));
-    }
     int attempt = 0;
     ret =  Container::create(path,Util::hostname(),mode,flags,
-                             &attempt,pid,expansion_info.mnt_pt->checksum,
-                             lazy_subdir);
+                             &attempt,pid,expansion_info.mnt_pt->checksum);
     PLFS_EXIT(ret);
 }
 
@@ -207,17 +166,25 @@ container_create( const char *logical, mode_t mode, int flags, pid_t pid )
 // returns number of current writers sharing the WriteFile * or -errno
 int
 addWriter(WriteFile *wf, pid_t pid, const char *path, mode_t mode,
-          string logical )
+          string logical, double timestamp, bool create_metalink)
 {
     int ret = -ENOENT;  // be pessimistic
     int writers = 0;
-    // might have to loop 3 times
-    // first discover that the subdir doesn't exist
-    // try to create it and try again
-    // if we fail to create it bec someone else created a metalink there
-    // then try again into where the metalink resolves
-    // but that might fail if our sibling hasn't created where it resolves yet
-    // so help our sibling create it, and then finally try the third time.
+
+    // discover all physical paths from logical one
+    ContainerPaths paths;
+    ret = findContainerPaths(logical,paths,pid);
+    if (ret!=0) {
+        PLFS_EXIT(ret);
+    }
+    wf->setContainerPath(paths.canonical);
+    if (paths.shadow!=paths.canonical) {
+        wf->setSubdirPath(paths.shadow);
+    } else {
+        wf->setSubdirPath(paths.canonical);
+    }
+
+    // just loop a second time in order to deal with ENOENT
     for( int attempts = 0; attempts < 2; attempts++ ) {
         // ok, the WriteFile *wf has a container path in it which is
         // path to canonical.  It attempts to open a file in a subdir
@@ -226,8 +193,20 @@ addWriter(WriteFile *wf, pid_t pid, const char *path, mode_t mode,
         // is badly broken somewhere.]
         // When it fails, create the hostdir.  It might be a metalink in
         // which case change the container path in the WriteFile to shadow path
-        writers = ret = wf->addWriter( pid, false );
+        // open ByteRange data file by default
+        writers = ret = wf->addWriter( pid, false, SINGLE_HOST_WRITE );
         if ( ret != -ENOENT ) {
+            if( ret > 0 && create_metalink && paths.shadow!=paths.canonical ){
+                ret = Container::createMetalink(paths.canonical_backend,
+                                                paths.shadow_backend,
+                                                paths.canonical_hostdir,
+                                                pid, timestamp, true);
+                if(ret != 0) {
+                   mlog(INT_DCOMMON, "%s metalink creation failed, ret = %d",
+                         __FUNCTION__,ret);
+                   PLFS_EXIT(ret);
+                }
+            }
             break;    // everything except ENOENT leaves
         }
         // if we get here, the hostdir doesn't exist (we got ENOENT)
@@ -235,28 +214,9 @@ addWriter(WriteFile *wf, pid_t pid, const char *path, mode_t mode,
         // 1) create a shadow container by hashing on node name
         // 2) create a shadow hostdir inside it
         // 3) create a metalink in canonical container identifying shadow
-        // 4) change the WriteFile path to point to shadow
         // 4) loop and try one more time
-        string physical_hostdir;
-        bool use_metalink = false;
-        // discover all physical paths from logical one
-        ContainerPaths paths;
-        ret = findContainerPaths(logical,paths);
-        if (ret!=0) {
-            PLFS_EXIT(ret);
-        }
-        ret=Container::makeHostDir(paths,mode, PARENT_ABSENT,
-                                   physical_hostdir, use_metalink);
-        if ( ret==0 ) {
-            // a sibling raced us and made the directory or link for us
-            // or we did
-            wf->setSubdirPath(physical_hostdir);
-            if (!use_metalink) {
-                wf->setContainerPath(paths.canonical);
-            } else {
-                wf->setContainerPath(paths.shadow);
-            }
-        } else {
+        ret=Container::makeHostDir(paths, mode, PARENT_ABSENT, pid, timestamp);
+        if ( ret!=0 ) {
             mlog(INT_DRARE,"Something weird in %s for %s.  Retrying.\n",
                  __FUNCTION__, paths.shadow.c_str());
             continue;
@@ -310,14 +270,18 @@ plfs_collect_from_containers(const char *logical, vector<string> &files,
         PLFS_EXIT(ret);
     }
     vector<string>::iterator itr;
+    set<string> targets;
+    vector<string> filters;
     for(itr=possible_containers.begin();
             itr!=possible_containers.end();
             itr++) {
-        ret = Util::traverseDirectoryTree(itr->c_str(),files,dirs,links);
-        if (ret!=0) {
+        ret=Container::collectContents(itr->c_str(),files,&dirs,&links,
+                                       targets,filters,true);
+        if (ret!=0 && ret!=-ENOENT) {
             ret = -errno;
             break;
         }
+        ret = 0;
     }
     PLFS_EXIT(ret);
 }
@@ -684,6 +648,7 @@ find_read_tasks(Index *index, list<ReadTask> *tasks, size_t size, off_t offset,
             bytes_remaining -= task.length;
             bytes_traversed += task.length;
         }
+
         // then if there is anything to it, add it to the queue
         if ( ret == 0 && task.length > 0 ) {
             mss::mlog_oss oss(INT_DCOMMON);
@@ -696,7 +661,7 @@ find_read_tasks(Index *index, list<ReadTask> *tasks, size_t size, off_t offset,
             // there seems to be a merging bug now too
             if ( ! tasks->empty() > 0 ) {
                 ReadTask lasttask = tasks->back();
-                if ( lasttask.fd == task.fd &&
+                if ( lasttask.fd == task.fd && task.fd > 0 &&
                         lasttask.hole == task.hole &&
                         lasttask.chunk_offset + (off_t)lasttask.length ==
                         task.chunk_offset &&
@@ -725,8 +690,11 @@ find_read_tasks(Index *index, list<ReadTask> *tasks, size_t size, off_t offset,
 int
 perform_read_task( ReadTask *task, Index *index )
 {
+    mlog(INT_DAPI, "Entre %s", __FUNCTION__);
     int ret;
     if ( task->hole ) {
+        mlog(INT_INFO, "Found a hole task, < %ld, %ld>",
+              (long)task->logical_offset, (long)task->length );
         memset((void *)task->buf, 0, task->length);
         ret = task->length;
     } else {
@@ -836,6 +804,7 @@ plfs_reader(Container_OpenFile *pfd, char *buf, size_t size, off_t offset,
     // let's leave early if possible to make remaining code cleaner by
     // not worrying about these conditions
     // tasks is empty for a zero length file or an EOF
+    mlog(INT_DRARE,  "%s: find %ld tasks", __FUNCTION__, tasks.size() );
     if ( ret != 0 || tasks.empty() ) {
         PLFS_EXIT(ret);
     }
@@ -963,7 +932,6 @@ plfs_hostdir_rddir(void **index_stream,char *targets,int rank,
         if (ret!=0) {
             return ret;
         }
-        index_droppings.erase(index_droppings.begin());
         Index tmp(top_level);
         tmp=Container::parAggregateIndices(index_droppings,0,1,path);
         global.merge(&tmp);
@@ -1001,23 +969,21 @@ plfs_parindex_read(int rank,int ranks_per_comm,void *index_files,
     size_t index_stream_sz;
     vector<IndexFileInfo> cvt_list;
     IndexFileInfo converter;
-    string path,index_path;
+    string index_path;
     cvt_list = converter.streamToList(index_files);
-    // Get out the path and clear the path holder
-    path=cvt_list[0].hostname;
-    mlog(INT_DCOMMON, "Hostdir path pushed on the list %s",path.c_str());
+    //mlog(INT_DCOMMON, "Hostdir path pushed on the list %s",path.c_str());
     mlog(INT_DCOMMON, "Path: %s used for Index file in parindex read",
          top_level);
     Index index(top_level);
-    cvt_list.erase(cvt_list.begin());
+    index_path=top_level;
+    index.setPath(index_path);
     //Everything seems fine at this point
     mlog(INT_DCOMMON, "Rank |%d| List Size|%lu|",rank,
          (unsigned long)cvt_list.size());
-    index=Container::parAggregateIndices(cvt_list,rank,ranks_per_comm,path);
+    index=Container::parAggregateIndices(cvt_list,rank,
+                                         ranks_per_comm,index_path);
     mlog(INT_DCOMMON, "Ranks |%d| About to convert global to stream",rank);
     // Don't forget to trick global to stream
-    index_path=top_level;
-    index.setPath(index_path);
     // Index should be populated now
     index.global_to_stream(index_stream,&index_stream_sz);
     return (int)index_stream_sz;
@@ -1191,12 +1157,12 @@ plfs_trim(const char *logical, pid_t pid)
     // 2) remove all droppings owned by this pid
     // 3) clean up the shadow container
     ContainerPaths paths;
-    ret = findContainerPaths(logical,paths);
+    string replica;
+    ret = findContainerPaths(logical,paths,pid);
     if (ret != 0) {
         PLFS_EXIT(ret);
     }
-    string replica = Container::getHostDirPath(paths.canonical,Util::hostname(),
-                     TMP_SUBDIR);
+    replica = Container::getHostDirPath(paths.canonical,pid,TMP_SUBDIR);
     string metalink = paths.canonical_hostdir;
     // rename replica over metalink currently at paths.canonical_hostdir
     // this could fail if a sibling was faster than us
@@ -1270,13 +1236,13 @@ plfs_protect(const char *logical, pid_t pid)
     // find path to shadowed subdir and make a temporary hostdir
     // in canonical
     ContainerPaths paths;
-    ret = findContainerPaths(logical,paths);
+    string src,dst;
+    ret = findContainerPaths(logical,paths,pid);
     if (ret != 0) {
         PLFS_EXIT(ret);
     }
-    string src = paths.shadow_hostdir;
-    string dst = Container::getHostDirPath(paths.canonical,Util::hostname(),
-                                           TMP_SUBDIR);
+    src = paths.shadow_hostdir;
+    dst = Container::getHostDirPath(paths.canonical,pid,TMP_SUBDIR);
     ret = retValue(Util::Mkdir(dst.c_str(),DEFAULT_MODE));
     if (ret == -EEXIST || ret == -EISDIR ) {
         ret = 0;
@@ -1357,22 +1323,36 @@ container_open(Container_OpenFile **pfd,const char *logical,int flags,
         if ( wf == NULL ) {
             // do we delete this on error?
             size_t indx_sz = 0;
-            if(open_opt&&open_opt->pinter==PLFS_MPIIO &&
-                    open_opt->buffer_index) {
+            if(open_opt&&open_opt->pinter==PLFS_MPIIO
+                  && open_opt->buffer_index) {
                 // this means we want to flatten on close
                 indx_sz = get_plfs_conf()->buffer_mbs;
             }
-            wf = new WriteFile(path, Util::hostname(), mode, indx_sz);
+            wf = new WriteFile(logical, path, Util::hostname(), mode, indx_sz);
             new_writefile = true;
         }
-        ret = addWriter(wf, pid, path.c_str(), mode,logical);
+        double timestamp;
+        bool create_metalink = false;
+        if(open_opt&&open_opt->pinter==PLFS_MPIIO){
+            timestamp = open_opt->metalink_timestamp; 
+            // for MPIIO, every rank need to create its metalink
+            // When reading, the metalink will be constructed and resolved
+            // to get its shadow subdir
+            create_metalink = true;
+        }else{
+            timestamp = Util::getTime();
+        }
+        wf->setMetalinkTime(timestamp);
+        ret = addWriter(wf, pid, path.c_str(), mode, logical,
+                        timestamp, create_metalink);
         mlog(INT_DCOMMON, "%s added writer: %d", __FUNCTION__, ret );
         if ( ret > 0 ) {
             ret = 0;    // add writer returns # of current writers
         }
         EISDIR_DEBUG;
         if ( ret == 0 && new_writefile ) {
-            ret = wf->openIndex( pid );
+            // open ByteRange index file by default
+            ret = wf->openIndex( pid, SINGLE_HOST_WRITE );
         }
         EISDIR_DEBUG;
         if ( ret != 0 && wf ) {
@@ -1498,9 +1478,10 @@ plfs_locate(const char *logical, void *files_ptr,
     if (S_ISREG(mode)) { // it's a PLFS file
         vector<string> *files = (vector<string> *)files_ptr;
         vector<string> filters;
+        set<string> targets;
         ret = Container::collectContents(path,*files,(vector<string>*)dirs_ptr,
                                          (vector<string>*)metalinks_ptr,
-                                         filters,true);
+                                         targets,filters,true);
         // do plfs_locate on a plfs directory
     } else if (S_ISDIR(mode)) {
         if (!dirs_ptr) {
@@ -1588,7 +1569,7 @@ container_utime( const char *logical, struct utimbuf *ut )
 
 ssize_t
 container_write(Container_OpenFile *pfd, const char *buf, size_t size,
-                off_t offset, pid_t pid)
+                off_t offset, pid_t pid, Plfs_write_opt *write_opt)
 {
     // this can fail because this call is not in a mutex so it's possible
     // that some other thread in a close is changing ref counts right now
@@ -1612,8 +1593,46 @@ container_write(Container_OpenFile *pfd, const char *buf, size_t size,
     */
     int ret = 0;
     ssize_t written;
-    WriteFile *wf = pfd->getWritefile();
-    ret = written = wf->write(buf, size, offset, pid);
+    bool current_formula_extended;
+    WriteFile *wf      = pfd->getWritefile();
+    Index     *index   = wf->getIndex();
+    WriteType wType;
+
+    if (write_opt != NULL && 
+       ( write_opt->pattern_type == STRIDED || 
+         write_opt->pattern_type == SEGMENTED) )
+    {
+        // a patterned write, either STRIDED or SEGMENTED
+        if (write_opt->writeArgs.patternArgs.write_index == 1){
+            wType = SIMPLE_FORMULA_WRITE;
+        } else {
+            assert(write_opt->writeArgs.patternArgs.write_index==0);
+            wType = SIMPLE_FORMULA_WITHOUT_INDEX;
+        }
+        // update SimpleFormula info
+        index->addSimpleFormulaWrite(
+              write_opt->writeArgs.patternArgs.number_of_writers,
+              write_opt->writeArgs.patternArgs.size,
+              write_opt->writeArgs.patternArgs.strided,
+              write_opt->writeArgs.patternArgs.start,
+              write_opt->writeArgs.patternArgs.end,
+              write_opt->writeArgs.patternArgs.end,
+              write_opt->writeArgs.patternArgs.timestamp,
+              current_formula_extended);
+        mlog(INT_DCOMMON, "%s: pid %ld %s simpleFormulaIndex",__FUNCTION__,
+            (long)write_opt->writeArgs.patternArgs.pid,
+            current_formula_extended?"extended":"doesn't extend");
+        if (!current_formula_extended){
+            // a new formula entry is inserted, update formulaTime
+            wf->setFormulaTime( write_opt->writeArgs.patternArgs.timestamp );
+            // open new formula data file and index file
+            wf->openNewDataFile(write_opt->writeArgs.patternArgs.pid, wType);
+            wf->openIndex(write_opt->writeArgs.patternArgs.pid, wType);
+        }
+    } else {
+        wType = SINGLE_HOST_WRITE;
+    }
+    ret = written = wf->write(buf, size, offset, pid, wType);
     mlog(PLFS_DAPI, "%s: Wrote to %s, offset %ld, size %ld: ret %ld",
          __FUNCTION__, pfd->getPath(), (long)offset, (long)size, (long)ret);
     PLFS_EXIT( ret >= 0 ? written : ret );
@@ -1787,13 +1806,14 @@ extendFile(Container_OpenFile *of, string canonical, const char *logical,
     pid_t pid = ( of ? of->getPid() : 0 );
     mode_t mode = Container::getmode( canonical );
     if ( wf == NULL ) {
-        wf = new WriteFile(canonical.c_str(), Util::hostname(), mode, 0);
-        ret = wf->openIndex( pid );
+        wf = new WriteFile(logical,canonical.c_str(),Util::hostname(),mode,0);
+        ret = wf->openIndex( pid, SINGLE_HOST_WRITE );
         newly_opened = true;
     }
     assert(wf);
     // in case that plfs_trunc is called with NULL Plfs_fd*.
-    ret = addWriter(wf, pid, canonical.c_str(), mode, logical);
+    ret = addWriter(wf, pid, canonical.c_str(), mode, logical,
+                    Util::getTime(), false);
     mlog(INT_DCOMMON, "%s added writer: %d", __FUNCTION__, ret );
     if ( ret > 0 ) {
         ret = 0;    // add writer returns # of current writers
@@ -1864,6 +1884,10 @@ container_trunc(Container_OpenFile *of, const char *logical, off_t offset,
             // this is easy, just remove/trunc all droppings
             ret = truncateFileToZero(path, logical,(bool)open_file);
         }
+        if ( ret == 0 ){
+            // now try to truncate meta files
+            ret = Container::truncateMeta(path, 0);
+        }
     } else {
         // either at existing end, before it, or after it
         bool sz_only = false; // sz_only isn't accurate in this case
@@ -1876,6 +1900,10 @@ container_trunc(Container_OpenFile *of, const char *logical, off_t offset,
             if ( stbuf.st_size == offset ) {
                 ret = 0; // nothing to do
             } else if ( stbuf.st_size > offset ) {
+                // sync before do truncate
+                if( of && of->getWritefile()){
+                    of->getWritefile()->sync();
+                }
                 ret = Container::Truncate(path, offset); // make smaller
                 mlog(PLFS_DCOMMON, "%s:%d ret is %d", __FUNCTION__,
                      __LINE__, ret);
@@ -1896,8 +1924,7 @@ container_trunc(Container_OpenFile *of, const char *logical, off_t offset,
                 // if it exists and is a directory, then nothing to do.
                 // if it's a metalink, resolve it and pass resolved path
                 container = path;
-                hdir = Container::getHostDirPath(path,Util::hostname(),
-                                                 PERM_SUBDIR);
+                hdir = Container::getHostDirPath(path,0,PERM_SUBDIR);
                 if (Util::exists(hdir.c_str())) {
                     if (! Util::isDirectory(hdir.c_str())) {
                         string resolved;

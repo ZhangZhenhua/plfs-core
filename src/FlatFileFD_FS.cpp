@@ -103,8 +103,10 @@ Flat_fd::read(char *buf, size_t size, off_t offset)
 }
 
 ssize_t
-Flat_fd::write(const char *buf, size_t size, off_t offset, pid_t pid)
+Flat_fd::write(const char *buf, size_t size, off_t offset, pid_t pid,
+               Plfs_write_opt *unused)
 {
+    assert(unused==NULL);
     int ret = Util::Pwrite(backend_fd, buf, size, offset);
     FLAT_EXIT(ret);
 }
