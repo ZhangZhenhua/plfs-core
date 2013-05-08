@@ -3,10 +3,12 @@
 
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 #include <utime.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <sys/uio.h> /* for writev */
 
 class IOStore;
 class IOSHandle;
@@ -75,6 +77,9 @@ class IOSHandle {
     virtual int ReleaseDataBuf(void *buf, size_t length)=0;
     virtual off_t Size(void)=0;
     virtual ssize_t Write(const void *buf, size_t nbytes)=0;
+    virtual ssize_t Writev(struct iovec *iov, int iovcnt){
+        return -ENOSYS;
+    }
     virtual ~IOSHandle() { }
 };
 

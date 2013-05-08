@@ -328,6 +328,20 @@ plfs_read(Plfs_fd *fd, char *buf, size_t size, off_t offset)
     return ret;
 }
 
+ssize_t
+plfs_readx(Plfs_fd *fd, struct iovec *iov, int iovcnt, plfs_xvec *xvec,
+           int xvcnt)
+{
+    mss::mlog_oss oss;
+    debug_enter(__FUNCTION__,oss.str());
+    ssize_t ret = 0;
+    if (iovcnt > 0 && xvcnt > 0){
+        ret = fd->readx(iov, iovcnt, xvec, xvcnt);
+    }
+    debug_exit(__FUNCTION__,oss.str(),ret);
+    return ret;
+}
+
 typedef struct {
     set<string> entries;
     set<string>::iterator itr;
@@ -587,6 +601,20 @@ plfs_write(Plfs_fd *fd, const char *buf, size_t size,
     ssize_t wret = 0;
     if (size > 0){
         wret = fd->write(buf, size, offset, pid);
+    }
+    debug_exit(__FUNCTION__,oss.str(),(int)wret);
+    return wret;
+}
+
+ssize_t
+plfs_writex(Plfs_fd *fd, struct iovec *iov, int iovcnt, plfs_xvec *xvec,
+            int xvcnt, pid_t pid)
+{
+    mss::mlog_oss oss(PLFS_DAPI);
+    debug_enter(__FUNCTION__,oss.str());
+    ssize_t wret = 0;
+    if (iovcnt > 0 && xvcnt > 0){
+        wret = fd->writex(iov, iovcnt, xvec, xvcnt, pid);
     }
     debug_exit(__FUNCTION__,oss.str(),(int)wret);
     return wret;

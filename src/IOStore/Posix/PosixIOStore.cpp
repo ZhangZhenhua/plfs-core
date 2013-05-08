@@ -141,6 +141,15 @@ PosixIOSHandle::Write(const void* buf, size_t len) {
     return(get_err(rv));
 }
 
+ssize_t
+PosixIOSHandle::Writev(struct iovec *iov, int iovcnt) {
+    POSIX_IO_ENTER(this->bpath.c_str());
+    ssize_t rv;
+    rv = writev(this->fd, iov, iovcnt);
+    POSIX_IO_EXIT(this->bpath.c_str(),rv);
+    return(get_err(rv));
+}
+
 int 
 PosixIOSDirHandle::Closedir() {
     POSIX_IO_ENTER(this->bpath.c_str());

@@ -32,4 +32,7 @@ public:
 size_t plfs_reader(void *unused, char *buf, size_t size,
                     off_t offset, PLFSIndex *index);
 
+size_t plfs_xreader(void *pfd, struct iovec *iov, int iovcnt, plfs_xvec *xvec,
+                     int xvcnt, PLFSIndex *index);
+
 #endif

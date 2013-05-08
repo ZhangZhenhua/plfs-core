@@ -77,6 +77,64 @@ container_dump_index( FILE *fp, const char *logical, int compress,
     PLFS_EXIT(ret);
 }
 
+// get index associated with pfd, build one if it's not existed.
+// returns a valid pointer or NULL
+Index *
+container_get_index(Container_OpenFile *pfd, bool &new_index_created)
+{
+    Index *index = pfd->getIndex();
+    int ret = 0;
+    // possible that we opened the file as O_RDWR
+    // if so, we may not have a persistent index
+    // build an index now, but destroy it after this IO
+    // so that new writes are re-indexed for new reads
+    // basically O_RDWR is possible but it can reduce read BW
+    if (index == NULL) {
+        index = new Index(pfd->getPath(), pfd->getCanBack());
+        if ( index ) {
+            // if they tried to do uniform restart, it will only work at open
+            // uniform restart doesn't currently work with O_RDWR
+            // to make it work, we'll have to store the uniform restart info
+            // into the Container_OpenFile
+            new_index_created = true;
+            ret = Container::populateIndex(pfd->getPath(),pfd->getCanBack(),
+                                           index,false,false,0);
+        }
+        if (ret != 0){
+            delete(index);
+            new_index_created = false;
+            index = NULL;
+        }
+    }
+    return index;
+}
+
+// if we had to create a temporary index due to O_RDWR, this is where we free
+// or cache it
+// return true if freed or false if cached
+bool
+container_free_or_cache_temporary_index(Container_OpenFile *pfd, Index *index)
+{
+    bool delete_index = true;
+
+    // we created a new index.  Maybe we cache it or maybe we destroy it.
+    if (cache_index_on_rdwr) {
+        pfd->lockIndex();
+        if (pfd->getIndex()==NULL) { // no-one else cached one
+            pfd->setIndex(index);
+            delete_index = false;
+        }
+        pfd->unlockIndex();
+    }
+    if (delete_index) {
+        delete(index);
+    }
+    mlog(PLFS_DCOMMON, "%s %s freshly created index for %s",
+         __FUNCTION__, delete_index?"removing":"caching", pfd->getPath());
+
+    return delete_index;
+}
+
 // should be called with a logical path and already_expanded false
 // or called with a physical path and already_expanded true
 // returns 0 or -err
@@ -765,54 +823,51 @@ ssize_t
 container_read( Container_OpenFile *pfd, char *buf, size_t size, off_t offset )
 {
     bool new_index_created = false;
-    Index *index = pfd->getIndex();
     ssize_t ret = 0;
+
     mlog(PLFS_DAPI, "Read request on %s at offset %ld for %ld bytes",
          pfd->getPath(),long(offset),long(size));
-    // possible that we opened the file as O_RDWR
-    // if so, we may not have a persistent index
-    // build an index now, but destroy it after this IO
-    // so that new writes are re-indexed for new reads
-    // basically O_RDWR is possible but it can reduce read BW
-    if (index == NULL) {
-        index = new Index(pfd->getPath(), pfd->getCanBack());
-        if ( index ) {
-            // if they tried to do uniform restart, it will only work at open
-            // uniform restart doesn't currently work with O_RDWR
-            // to make it work, we'll have to store the uniform restart info
-            // into the Container_OpenFile
-            new_index_created = true;
-            ret = Container::populateIndex(pfd->getPath(),pfd->getCanBack(),
-                                           index,false,false,0);
-        } else {
-            ret = -EIO;
-        }
-    }
-    if ( ret == 0 ) {
+
+    Index *index = container_get_index(pfd, new_index_created);
+
+    if (index != NULL) {
         ret = plfs_reader(pfd,buf,size,offset,index);
+    } else {
+        ret = -EIO;
     }
     mlog(PLFS_DAPI, "Read request on %s at offset %ld for %ld bytes: ret %ld",
          pfd->getPath(),long(offset),long(size),long(ret));
-    // we created a new index.  Maybe we cache it or maybe we destroy it.
-    if (new_index_created) {
-        bool delete_index = true;
-        if (cache_index_on_rdwr) {
-            pfd->lockIndex();
-            if (pfd->getIndex()==NULL) { // no-one else cached one
-                pfd->setIndex(index);
-                delete_index = false;
-            }
-            pfd->unlockIndex();
-        }
-        if (delete_index) {
-            delete(index);
-        }
-        mlog(PLFS_DCOMMON, "%s %s freshly created index for %s",
-             __FUNCTION__, delete_index?"removing":"caching", pfd->getPath());
+
+    if (new_index_created){
+        container_free_or_cache_temporary_index(pfd, index);
     }
     PLFS_EXIT(ret);
 }
 
+// returns -errno or bytes read
+ssize_t
+container_readx(Container_OpenFile *pfd, struct iovec *iov, int iovcnt,
+                plfs_xvec *xvec, int xvcnt)
+{
+    bool new_index_created = false;
+    ssize_t ret = 0;
+
+    mlog(PLFS_DAPI, "Readx request on %s", pfd->getPath());
+
+    Index *index = container_get_index(pfd, new_index_created);
+
+    if (index != NULL ) {
+        ret = plfs_xreader(pfd,iov,iovcnt,xvec,xvcnt,index);
+    } else {
+        ret = -EIO;
+    }
+    mlog(PLFS_DAPI, "Read request on %s: ret %ld", pfd->getPath(), long(ret));
+
+    if (new_index_created){
+        container_free_or_cache_temporary_index(pfd, index);
+    }
+    PLFS_EXIT(ret);
+}
 
 // Function that reads in the hostdirs and sets the bitmap
 // this function still works even with metalink stuff
@@ -1669,6 +1724,34 @@ container_write(Container_OpenFile *pfd, const char *buf, size_t size,
     mlog(PLFS_DAPI, "%s: Wrote to %s, offset %ld, size %ld: ret %ld",
          __FUNCTION__, pfd->getPath(), (long)offset, (long)size, (long)ret);
     PLFS_EXIT( ret >= 0 ? written : ret );
+}
+
+ssize_t
+container_writex(Container_OpenFile *pfd, struct iovec *iov, int iovcnt,
+                 plfs_xvec *xvec, int xvcnt, pid_t pid)
+{
+    int i, j;
+    size_t written = 0, iovLen = 0, xvecLen = 0;
+    WriteFile *wf = pfd->getWritefile();
+
+    // calculate total size of memory segments and logical ranges
+    for(i=0; i<iovcnt; i++){
+        iovLen += iov[i].iov_len; // total size for memory segments
+    }
+    for(j=0; j<xvcnt; j++){
+        xvecLen += xvec[j].len; // total size for logical ranges
+    }
+    // iovLen should be less than or equal to xvecLen.
+    if(iovLen > xvecLen) return -EINVAL;
+
+    if(iovLen != 0){
+        written = wf->writex(iov, iovcnt, xvec, xvcnt, pid);
+    }
+
+    mlog(PLFS_DAPI, "%s: Wrote to %s, size %ld", __FUNCTION__,
+         pfd->getPath(), (long)written);
+
+    PLFS_EXIT(written);
 }
 
 int

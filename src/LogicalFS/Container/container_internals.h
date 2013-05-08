@@ -147,6 +147,8 @@ int container_query( Container_OpenFile *, size_t *writers,
 
 ssize_t container_read( Container_OpenFile *, char *buf, size_t size,
                         off_t offset );
+ssize_t container_readx(Container_OpenFile *, struct iovec *, int, plfs_xvec *,
+                        int);
 
 int container_readdir( const char *path, set<string> * );
 
@@ -184,6 +186,8 @@ int container_utime( const char *path, struct utimbuf *ut );
 
 ssize_t container_write( Container_OpenFile *, const char *, size_t, off_t,
                          pid_t );
+ssize_t container_writex(Container_OpenFile *, struct iovec *, int, plfs_xvec *,
+                         int, pid_t);
 
 int container_prepare_writer( WriteFile *, pid_t, mode_t, const string& );
 

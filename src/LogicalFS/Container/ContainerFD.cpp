@@ -45,6 +45,19 @@ Container_fd::write(const char *buf, size_t size, off_t offset, pid_t pid)
     return container_write(fd, buf, size, offset, pid);
 }
 
+ssize_t
+Container_fd::readx(struct iovec *iov, int iovcnt, plfs_xvec *xvec, int xvcnt)
+{
+    return container_readx(fd, iov, iovcnt, xvec, xvcnt);
+}
+
+ssize_t
+Container_fd::writex(struct iovec *iov, int iovcnt, plfs_xvec *xvec, int xvcnt,
+                     pid_t pid)
+{
+    return container_writex(fd, iov, iovcnt, xvec, xvcnt, pid);
+}
+
 int
 Container_fd::sync()
 {

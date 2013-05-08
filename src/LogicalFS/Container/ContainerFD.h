@@ -17,6 +17,8 @@ class Container_fd : public Plfs_fd
         ssize_t read(char *buf, size_t size, off_t offset);
         int rename(const char *path, struct plfs_backend *b);
         ssize_t write(const char *buf, size_t size, off_t offset, pid_t pid);
+        ssize_t readx(struct iovec *, int, plfs_xvec *, int);
+        ssize_t writex(struct iovec *, int, plfs_xvec *, int, pid_t);
         int sync();
         int sync(pid_t pid);
         int trunc(const char *path, off_t offset);

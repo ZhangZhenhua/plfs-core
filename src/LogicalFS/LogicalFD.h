@@ -3,6 +3,7 @@
 
 #include "plfs.h"
 #include <string>
+#include <errno.h>
 using namespace std;
 
 class Plfs_fd
@@ -16,6 +17,16 @@ class Plfs_fd
         virtual ssize_t read(char *buf, size_t size, off_t offset) = 0;
         virtual ssize_t write(const char *buf, size_t size, off_t offset,
                               pid_t pid) = 0;
+        virtual ssize_t readx(struct iovec *iov, int iovcnt, plfs_xvec *xvec,
+                              int xvcnt)
+        {
+            return -ENOSYS;
+        }
+        virtual ssize_t writex(struct iovec *iov, int iovcnt, plfs_xvec *xvec,
+                               int xvcnt, pid_t pid)
+        {
+            return -ENOSYS;
+        }
         virtual int sync() = 0;
         virtual int sync(pid_t pid) = 0;
         virtual int trunc(const char *path, off_t offset) = 0;

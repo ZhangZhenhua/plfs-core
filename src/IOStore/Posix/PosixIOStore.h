@@ -23,6 +23,7 @@ class PosixIOSHandle: public IOSHandle {
     int ReleaseDataBuf(void *buf, size_t length);
     off_t Size();
     ssize_t Write(const void* buf, size_t len);
+    ssize_t Writev(struct iovec *iov, int iovcnt);
     
  private:
     int Close();
