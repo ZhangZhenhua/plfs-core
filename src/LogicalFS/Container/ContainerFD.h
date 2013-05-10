@@ -26,6 +26,8 @@ class Container_fd : public Plfs_fd
 	int getxattr(void *value, const char *key, size_t len);
 	int setxattr(const void *value, const char *key, size_t len);
         int query(size_t *, size_t *, size_t *, bool *reopen);
+        int query_shard(off_t, size_t, plfs_shard **, int);
+        int free_shard(plfs_shard *shard, int loc_required);
         bool is_good();
 
         // Functions leaked to FUSE and ADIO:

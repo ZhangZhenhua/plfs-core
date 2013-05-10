@@ -689,6 +689,7 @@ container_mkdir( const char *logical, mode_t mode )
 {
     PLFS_ENTER;
     CreateOp op(mode);
+    op.ignoreErrno(-EEXIST);
     ret = plfs_iterate_backends(logical,op);
     PLFS_EXIT(ret);
 }
@@ -706,6 +707,7 @@ container_rmdir( const char *logical )
     // save mode in case we need to restore
     mode_t mode = Container::getmode(path, expansion_info.backend);
     UnlinkOp op;
+    op.ignoreErrno(-ENOENT);
     ret = plfs_iterate_backends(logical,op);
     // check if we started deleting non-empty dirs, if so, restore
     if (ret==-ENOTEMPTY) {
@@ -2143,6 +2145,47 @@ container_query( Container_OpenFile *pfd, size_t *writers,
         *reopen = pfd->isReopen();
     }
     return 0;
+}
+
+// This function is used to fetch back all valid shards between <offset, size>
+// using plfs_shard.
+// returns 0 or -err
+int
+container_query_shard(Container_OpenFile *pfd, off_t offset, size_t size,
+                      plfs_shard **shard, int loc_required)
+{
+    bool new_index_created = false;
+    int ret = 0;
+
+    mlog(PLFS_DAPI, "Query range request on %s at offset %ld for %ld bytes",
+         pfd->getPath(),long(offset),long(size));
+
+    Index *index = container_get_index(pfd, new_index_created);
+    if ( index != NULL ) {
+        ret = plfs_shard_builder(index, offset, size, loc_required, shard);
+    }
+    mlog(PLFS_DAPI, "Query shard request on %s at offset %ld for %ld bytes: "
+            "ret %d", pfd->getPath(),long(offset),long(size),ret);
+
+    if (new_index_created){
+        container_free_or_cache_temporary_index(pfd, index);
+    }
+    PLFS_EXIT(ret);
+}
+
+// free memory allocated by container_query_shard.
+// returns 0 or -err
+int
+container_free_shard(plfs_shard *shard, int loc_required)
+{
+    int ret = 0;
+    mlog(PLFS_DAPI, "%s: shard head %p, loc_required %d\n", __FUNCTION__,
+            shard, loc_required);
+
+    ret = free_shard_list(shard, loc_required);
+    mlog(PLFS_DAPI, "%s: ret %d\n", __FUNCTION__, ret);
+
+    PLFS_EXIT(ret);
 }
 
 // TODO: rename to container_reference_count

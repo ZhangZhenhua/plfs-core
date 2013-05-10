@@ -145,6 +145,10 @@ int container_open( Container_OpenFile **, const char *path,
 int container_query( Container_OpenFile *, size_t *writers,
                      size_t *readers, size_t *bytes_written, bool *reopen );
 
+int container_query_shard(Container_OpenFile *, off_t, size_t, plfs_shard **,
+                          int);
+int container_free_shard(plfs_shard *shard, int loc_required);
+
 ssize_t container_read( Container_OpenFile *, char *buf, size_t size,
                         off_t offset );
 ssize_t container_readx(Container_OpenFile *, struct iovec *, int, plfs_xvec *,

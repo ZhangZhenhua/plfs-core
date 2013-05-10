@@ -50,6 +50,16 @@ class Plfs_fd
         // the caller must also call the FS rename separately
         virtual int rename(const char *path, struct plfs_backend *b) = 0;
 
+        virtual int query_shard(off_t offset, size_t size, plfs_shard **shard,
+                                int loc_required)
+        {
+            return -ENOSYS;
+        }
+        virtual int free_shard(plfs_shard *shard, int loc_required)
+        {
+            return -ENOSYS;
+        }
+
 };
 
 inline Plfs_fd::~Plfs_fd() {};
