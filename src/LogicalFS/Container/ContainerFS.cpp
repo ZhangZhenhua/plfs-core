@@ -115,9 +115,9 @@ ContainerFileSystem::readlink(const char *path, char *buf, size_t bufsize)
 }
 
 int
-ContainerFileSystem::rmdir(const char *path)
+ContainerFileSystem::rmdir(const char *path, int recursive)
 {
-    return container_rmdir(path);
+    return container_rmdir(path, recursive);
 }
 
 int

@@ -418,12 +418,12 @@ FlatFileSystem::readlink(const char *logical, char *buf, size_t bufsize)
 }
 
 int
-FlatFileSystem::rmdir(const char *logical)
+FlatFileSystem::rmdir(const char *logical, int recursive)
 {
     FLAT_ENTER;
     mode_t mode = 0; // silence compiler warning
     ret = FlatFileSystem::getmode(logical, &mode); // XXX: ret never read
-    UnlinkOp op;
+    UnlinkOp op(recursive);
     ret = plfs_iterate_backends(logical,op);
     if (ret==-ENOTEMPTY) {
         mlog(PLFS_DRARE, "Started removing a non-empty directory %s. "

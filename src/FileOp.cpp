@@ -164,6 +164,17 @@ TruncateOp::ignore(string path)
     ignores.push_back(path);
 }
 
+UnlinkOp::UnlinkOp()
+{
+    // default behavior
+    this->recursive = 0;
+}
+
+UnlinkOp::UnlinkOp(int r)
+{
+    this->recursive = r;
+}
+
 /* ret 0 or -err */
 int
 UnlinkOp::do_op(const char *path, unsigned char isfile, IOStore *store)
@@ -171,7 +182,11 @@ UnlinkOp::do_op(const char *path, unsigned char isfile, IOStore *store)
     if (isfile==DT_REG || isfile==DT_LNK) {
         return store->Unlink(path);
     } else if (isfile==DT_DIR||isfile==DT_CONTAINER) {
-        return store->Rmdir(path);
+        if(recursive) {
+            return op_r(path, isfile, store, true);
+        } else {
+            return store->Rmdir(path);
+        }
     } else {
         return -ENOSYS;
     }
