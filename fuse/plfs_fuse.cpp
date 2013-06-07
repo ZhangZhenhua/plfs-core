@@ -781,7 +781,7 @@ int Plfs::f_mkdir (const char *path, mode_t mode )
 int Plfs::f_rmdir( const char *path )
 {
     FUSE_PLFS_ENTER;
-    ret = plfs_rmdir(strPath.c_str());
+    ret = plfs_rmdir(strPath.c_str(), 0);
     FUSE_PLFS_EXIT;
 }
 

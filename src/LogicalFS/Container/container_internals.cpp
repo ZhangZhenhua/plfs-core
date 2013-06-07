@@ -639,15 +639,16 @@ container_mkdir( const char *logical, mode_t mode )
 // possible with multiple backends that some are empty and some aren't
 // so if we delete some and then later discover that some aren't empty
 // we need to restore them all
+// if recursive is set to non-zero, try to remove directory recursively
 // need to test this corner case probably
 // return 0 or -err
 int
-container_rmdir( const char *logical )
+container_rmdir( const char *logical, int recursive )
 {
     PLFS_ENTER;
     // save mode in case we need to restore
     mode_t mode = Container::getmode(path, expansion_info.backend);
-    UnlinkOp op;
+    UnlinkOp op(recursive);
     ret = plfs_iterate_backends(logical,op);
     // check if we started deleting non-empty dirs, if so, restore
     if (ret==-ENOTEMPTY) {

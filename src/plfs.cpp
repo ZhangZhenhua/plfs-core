@@ -445,7 +445,7 @@ plfs_rename(const char *from, const char *to)
 }
 
 int
-plfs_rmdir(const char *path)
+plfs_rmdir(const char *path, int recursive)
 {
     debug_enter(__FUNCTION__,path);
     int ret = 0;
@@ -455,7 +455,7 @@ plfs_rmdir(const char *path)
     if (logicalfs == NULL) {
         ret = -EINVAL;
     }else{
-        ret = logicalfs->rmdir(stripped_path);
+        ret = logicalfs->rmdir(stripped_path, recursive);
     }
     debug_exit(__FUNCTION__,path,ret);
     return ret;

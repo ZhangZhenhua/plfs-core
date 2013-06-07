@@ -38,7 +38,7 @@ class
         virtual int mkdir(const char *path, mode_t) = 0;
         virtual int readdir(const char *path, set<string> *entries) = 0;
         virtual int readlink(const char *path, char *buf, size_t bufsize) = 0;
-        virtual int rmdir(const char *path) = 0;
+        virtual int rmdir(const char *path, int recursive) = 0;
         virtual int symlink(const char *path, const char *to) = 0;
         virtual int statvfs(const char *path, struct statvfs *stbuf) = 0;
         virtual int flush_writes(const char *dir) {return 0;};

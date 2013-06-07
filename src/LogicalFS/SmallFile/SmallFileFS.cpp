@@ -423,7 +423,7 @@ SmallFileFS::readdir(const char *path, set<string> *buf)
 }
 
 int
-SmallFileFS::rmdir(const char *path)
+SmallFileFS::rmdir(const char *path, int recursive)
 {
     PathExpandInfo expinfo;
     int ret = -1;
@@ -447,7 +447,7 @@ SmallFileFS::rmdir(const char *path)
     }
     mode_t mode;
     ret = getmode(path, &mode); // save in case we need to restore
-    UnlinkOp op;
+    UnlinkOp op(recursive);
     ret = plfs_iterate_backends(path, op);
     // check if we started deleting non-empty dirs, if so, restore
     if (ret == -ENOTEMPTY) {

@@ -27,7 +27,7 @@ class FlatFileSystem : public LogicalFileSystem
         int mkdir(const char *path, mode_t);
         int readdir(const char *path, set<string> *buf);
         int readlink(const char *path, char *buf, size_t bufsize);
-        int rmdir(const char *path);
+        int rmdir(const char *path, int recursive);
         int symlink(const char *path, const char *to);
         int statvfs(const char *path, struct statvfs *stbuf);
 };

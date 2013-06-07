@@ -165,7 +165,7 @@ int container_rename_open_file(Container_OpenFile *of, const char *logical,
 
 int container_rename( const char *from, const char *to );
 
-int container_rmdir( const char *path );
+int container_rmdir( const char *path, int recursive );
 
 int container_statvfs( const char *path, struct statvfs *stbuf );
 
